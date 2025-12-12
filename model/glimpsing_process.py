@@ -83,13 +83,17 @@ class SaliencyMapBasedGlimpsing(nn.Module):
         saliency_map = saliency_map.unsqueeze(1)
 
         # block the current location in the saliency map using IoR
-        mask = self.masker(current_location).unsqueeze(1)
+        mask = self.masker(current_location, custom_mask_size=1).unsqueeze(1)
         saliency_map = torch.where(mask.bool(), 0., saliency_map)
 
         if ior_glimpse_hist_mask is None:
             # initialize IoR mask 
             if self.soft_ior:
-                ior_glimpse_hist_mask = torch.ones_like(saliency_map, device=saliency_map.device)
+                if self.ior_mask_size is None:
+                    # for soft IoR with adaptive mask size, initialize with zeros
+                    ior_glimpse_hist_mask = torch.zeros_like(saliency_map, device=saliency_map.device)
+                else:
+                    ior_glimpse_hist_mask = torch.ones_like(saliency_map, device=saliency_map.device)
             else:
                 ior_glimpse_hist_mask = torch.zeros_like(saliency_map, device=saliency_map.device)
         if self.soft_ior and torch.equal(ior_glimpse_hist_mask, torch.zeros_like(ior_glimpse_hist_mask)):
@@ -111,6 +115,12 @@ class SaliencyMapBasedGlimpsing(nn.Module):
         best_loc_idx = distances.argmin(-1)
 
         locations = torch.stack([best_loc_idx // self.image_size, best_loc_idx % self.image_size], -1)
+
+        pixel_locations = torch.stack([
+            best_loc_idx // self.image_size,   # y-coordinate (row)
+            best_loc_idx % self.image_size     # x-coordinate (col)
+        ], -1)
+                
         locations += 1
 
         # push locs into the range [-1, 1]
@@ -123,15 +133,34 @@ class SaliencyMapBasedGlimpsing(nn.Module):
             torch.ones_like(locations), locations)
 
         if self.soft_ior:
+            if self.ior_mask_size is None:
+                # extract saliency at the chosen pixel
+                B = saliency_map.shape[0]
+                y = pixel_locations[:, 0].long()
+                x = pixel_locations[:, 1].long()
+                sm_value = saliency_map[torch.arange(B), 0, y, x]
+
+                sm_value = sm_value.clamp(min=1e-4)
+
+                # high saliency → small eps → wide Gaussian → bigger IoR region
+                eps = 10/sm_value
+
+            else:
+                eps = self.ior_mask_size ** 2
             mask = self.rbf(
                 (self.grid.permute(0, 2, 3, 1) - locations[:, None, None]).square().mean(-1),
-                eps=self.ior_mask_size ** 2
+                eps=eps
             ).unsqueeze(1)
-            ior_glimpse_hist_mask = ior_glimpse_hist_mask * (1 - mask)
+            if self.ior_mask_size is None:
+                ior_glimpse_hist_mask = (ior_glimpse_hist_mask * (1 - mask)).clip(0., 1.)
+            else:
+                ior_glimpse_hist_mask = ior_glimpse_hist_mask * (1 - mask)
+            
+
         else:
             mask = self.masker(next_xy_location).unsqueeze(1)
             ior_glimpse_hist_mask = (ior_glimpse_hist_mask + mask).clip(0., 1.)
 
-        return next_xy_location, ior_glimpse_hist_mask
+        return next_xy_location, ior_glimpse_hist_mask, mask
 
 
