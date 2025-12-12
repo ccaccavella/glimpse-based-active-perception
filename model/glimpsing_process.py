@@ -143,7 +143,11 @@ class SaliencyMapBasedGlimpsing(nn.Module):
                 sm_value = sm_value.clamp(min=1e-4)
 
                 # high saliency → small eps → wide Gaussian → bigger IoR region
+                
                 eps = 10/sm_value
+                eps = eps.view(-1, 1, 1).to(saliency_map.device)
+                # print(sm_value)
+                # print(eps)
 
             else:
                 eps = self.ior_mask_size ** 2
